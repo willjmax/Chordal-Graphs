@@ -2,7 +2,9 @@ module Lib
     ( graph1
     , grph
     , maxClique
+    , maxCliqueFold
     , maxCliqueSize
+    , maxCliqueSizeFold
     , isChordal
     , triangle
     , chordal1
@@ -57,6 +59,9 @@ chordalCompletion' g (n:ns) = chordalCompletion' gc ns
           es = labEdges g
           fs = [x | x <- zip3 (repeat n) ns (repeat ()), not (x `elem` es)]
 
+--chordalCompletionFold :: Gr a () -> Gr a ()
+--chordalCompletionFold = ufold 
+
 maxCliqueSize :: Gr a b -> Int
 maxCliqueSize g = 1 + go g 1
     where
@@ -67,6 +72,9 @@ maxCliqueSize g = 1 + go g 1
                     (Just c, g') -> max k (go g' (n+1))
                         where k = length $ lsuc' c
                     (Nothing, _) -> error "Vertex not found"
+
+maxCliqueSizeFold :: Gr a b -> Int
+maxCliqueSizeFold g = 1 + ufold (\c k -> max (length $ lsuc' c) k) 0 g
 
 maxClique :: Gr a b -> [Node]
 maxClique g = go g 1 []
@@ -80,6 +88,16 @@ maxClique g = go g 1 []
                               k   = length ns
                               k'  = length ns'
                     (Nothing, _) -> ns
+
+maxCliqueFold :: Gr a b -> [Node]
+maxCliqueFold = ufold maxCliqueFold' []
+
+maxCliqueFold' :: Context a b -> [Node] -> [Node]
+maxCliqueFold' c ns = if k' > k then ns' else ns
+    where ns' = n : suc' c
+          k   = length ns
+          k'  = length ns'
+          n   = node' c
 
 chordal1 :: Gr Char ()
 chordal1 = mkGraph [(1, 'a'), (2, 'f'), (3, 'd'), (4, 'h'), (5, 'c'), (6, 'g'), (7, 'b'), (8, 'e')]
