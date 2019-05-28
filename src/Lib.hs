@@ -1,23 +1,108 @@
 module Lib
-    ( graph1
-    , grph
-    , maxClique
+    ( maxClique
     , maxCliqueFold
     , maxCliqueSize
     , maxCliqueSizeFold
     , isChordal
-    , triangle
-    , chordal1
     , chordalCompletion
+    , sucNeighbors
+    , testTD
+    , addToBag
+    , addSucs
+    , getSucSet
+    , buildTreeDecomp
+    , third
+    , treeDecomp
     ) where
 
+import Control.Monad.State
 import Data.Graph.Inductive.Graph
 import Data.Graph.Inductive.PatriciaTree
+import Data.List
+import Data.Set (Set)
+import qualified Data.IntMap.Lazy as IM
+import qualified Data.Set as Set
 
-type TreeDecomp = Gr [Node] ()
+-- maybe use Map as a state to pass through treeDecomp
+-- import qualified Data.Map as Map
 
-cxt  = ([],2,(),[]) :: Context () ()
-grph = cxt & empty :: Gr () ()
+-- TODO: finish treeDecomp function
+--       make types more general by not enforcing unlabeled edges 
+--       implement independent set
+--       input graphs from text file using IO monad
+--       implement isChordal as a fold
+
+type Bag        = Set Node
+type TreeDecomp = Gr Bag ()
+type SucSet     = Node -> Set Node
+
+-- TDState contains: 
+--      the mapping of nodes to their bags
+--      the set of successors for each node in g
+--      the partial tree decomposition
+--      the current bag being processed
+
+type TDState    = (IM.IntMap Node, SucSet, TreeDecomp, Node)
+
+third :: (a,b,c,d) -> c
+third (_,_,c,_) = c
+
+testTD = mkGraph [(1, Set.fromList [1, 2, 3, 4]), (2, Set.fromList [2, 3]), (3, Set.fromList [3, 4]), (4, Set.fromList [1, 4])]
+                 [(1, 2, ()), (2, 3, ()), (3, 4, ())]
+                 :: TreeDecomp
+
+--  i: index of the current vertex being processed
+--  k: index of current bag being populated
+-- td: the tree decomposition
+--  b: current bag being populated
+--  t: a function Node -> Node that maps a node of g to it's corresponding bag in td
+
+buildTreeDecomp :: Gr a b -> State TDState ()
+buildTreeDecomp g
+    | isEmpty g = return ()
+    | otherwise = do
+                    (im, ss,td,k) <- get
+                    let (c,g') = matchLargest g -- process elimination ordering backwards
+                        i      = node' c        -- current node of g being processed
+                        bi     = ss i           -- the new bag
+                        m      = minimum bi      -- minimum successor of i
+                        tm     = case IM.lookup m im of
+                                    Just l   -> l
+                                    Nothing  -> error "tm: Bag not found"
+                        bm     = case match tm td of
+                                    (Just c,_)   -> lab' c
+                                    (Nothing,_)  -> error "bm: Bag not found" 
+                    if bi == bm
+                    then
+                        let im' = IM.insert i tm im
+                            td' = addToBag td tm i
+                        in put (im', ss, td', k)
+                    else
+                        let k'  = k + 1
+                            bk' = Set.insert i bi
+                            im' = IM.insert i k' im
+                            td' = ([], k', bk', [((), tm)]) & td
+                        in put (im', ss, td', k')
+                    buildTreeDecomp g'
+
+treeDecomp :: Gr a b -> ((), TDState)
+treeDecomp g = runState (buildTreeDecomp g') ( IM.singleton n 1
+                                             , getSucSet g
+                                             , mkGraph [(1, Set.singleton n)] []
+                                             , 1
+                                             )
+    where n  = noNodes g
+          g' = delNode n g
+
+-- get all neighbors of a vertex v that are also successors of v in the elimination ordering
+sucNeighbors :: Gr a b -> Node -> [Node]
+sucNeighbors g n = filter (\v -> v `elem` suc g n) (neighbors g n)
+
+-- add vertex to bag      Bag     Vertex
+addToBag :: TreeDecomp -> Node -> Node -> TreeDecomp
+addToBag td b v = insNode (b, lb') (delNode b td)
+    where lb  = case lab td b of (Just l) -> l -- TreeDecomp type should make this safe
+          lb' = Set.insert v lb
 
 isChordal :: Gr a b -> Bool
 isChordal g = go g 1
@@ -38,29 +123,23 @@ isChordal' (n:ns) es = vChordal n ns && isChordal' ns es
     where
         vChordal n [] = True
         vChordal n (n':ns) = (n, n') `elem` es && vChordal n ns
-        
-chordalCompletion :: Gr a () -> Gr a ()
-chordalCompletion g = go g 1
-    where
-        go g n
-            | isEmpty g = g
-            | otherwise =
-                case match n g of
-                    (Just c, _) -> go gc (n+1)
-                        where ns = map fst $ lsuc' c
-                              gc = chordalCompletion' g ns
-                    (Nothing, _) -> g
+
+--isChordalFold :: Gr a b -> Bool
+--isChordalFold = ufold (\c -> True) True
 
 -- helper function for chordalCompletion
-chordalCompletion' :: Gr a () -> [Node] -> Gr a ()
-chordalCompletion' g []     = g
-chordalCompletion' g (n:ns) = chordalCompletion' gc ns
+addClique :: Gr a () -> [Node] -> Gr a ()
+addClique g []     = g
+addClique g (n:ns) = addClique gc ns
     where gc = insEdges fs g
           es = labEdges g
           fs = [x | x <- zip3 (repeat n) ns (repeat ()), not (x `elem` es)]
 
---chordalCompletionFold :: Gr a () -> Gr a ()
---chordalCompletionFold = ufold 
+chordalCompletion :: Gr a () -> Gr a ()
+chordalCompletion g = ufold chordalCompletion' g g
+
+chordalCompletion' :: Context a () -> Gr a () -> Gr a ()
+chordalCompletion' c g = addClique g (map fst $ lsuc' c)
 
 maxCliqueSize :: Gr a b -> Int
 maxCliqueSize g = 1 + go g 1
@@ -99,14 +178,55 @@ maxCliqueFold' c ns = if k' > k then ns' else ns
           k'  = length ns'
           n   = node' c
 
-chordal1 :: Gr Char ()
-chordal1 = mkGraph [(1, 'a'), (2, 'f'), (3, 'd'), (4, 'h'), (5, 'c'), (6, 'g'), (7, 'b'), (8, 'e')]
-                   [(1, 5, ()), (1, 7, ()), (2, 6, ()), (2, 7, ()), (3, 5, ()), (3, 8, ()), (4, 6, ()), (4, 8, ()), (5, 7, ()), (5, 8, ()), (6, 7, ()), (6, 8, ()), (7, 8, ())]
+ofold :: (Graph gr) => (Context a b -> c -> c) -> c -> gr a b -> c
+ofold f u g = ofold' f u g (nodes g)
 
-triangle :: Gr () ()
-triangle = mkGraph [(1, ()), (2, ()), (3, ())]
-                   [(1, 2, ()), (1, 3, ()), (2, 3, ())]
+ofold' :: (Graph gr) => (Context a b -> c -> c) -> c -> gr a b -> [Node] -> c
+ofold' _ u _ []     = u
+ofold' f u g (n:ns) = f c (ofold' f u g ns)
+    where c = context g n
 
-graph1 = mkGraph [(1, ()), (2, ()), (3, ()), (4, ()), (5, ()), (6, ())] 
-                 [(1, 2, ()), (1, 4, ()), (2, 3, ()), (2, 4, ()), (2, 5, ()), (2, 6, ())]
-                 :: Gr () ()
+type NodeMap = Node -> Int
+
+inc :: NodeMap -> Node -> NodeMap
+inc f n = \x -> if x == n then (f n) + 1 else f n
+
+incr :: NodeMap -> [Node] -> NodeMap
+incr f ns = \n -> if n `elem` ns then (f n) + 1 else f n
+
+incrBy :: NodeMap -> Node -> Int -> NodeMap
+incrBy f v x = \n -> if v == n then (f n) + x else f n
+
+degrees :: Gr a b -> NodeMap
+degrees = ufold (\c f -> incrBy (incr f (suc' c ++ pre' c)) (node' c) (deg' c)) (const 0)
+
+maxDegree :: Gr a b -> Int
+maxDegree g = maximum (map f (nodes g))
+    where f = degrees g
+
+ufold' :: (Graph gr) => (gr a b -> GDecomp gr a b) -> (Context a b -> c -> c) -> c -> gr a b -> c
+ufold' m f u g
+    | isEmpty g = u
+    | otherwise = f c (ufold' m f u g')
+    where
+        (c,g') = m g
+
+matchLargest :: (Graph gr) => gr a b -> GDecomp gr a b
+matchLargest g = case (reverse $ nodes g) of
+                   []    -> error "Match Exception, Empty Graph"
+                   (v:_) -> (c,g')
+                     where
+                       (Just c,g') = match v g
+
+rfold :: (Graph gr) => (Context a b -> c -> c) -> c -> gr a b -> c
+rfold f u g
+    | isEmpty g = u
+    | otherwise = f c (rfold f u g')
+    where
+        (c,g') = matchLargest g
+
+addSucs :: SucSet -> Node -> [Node] -> SucSet
+addSucs f n ns = \x -> if x `elem` ns then Set.insert n (f x) else f x
+
+getSucSet :: Gr a b -> SucSet
+getSucSet = rfold (\c f -> addSucs f (node' c) (pre' c)) (const Set.empty)
