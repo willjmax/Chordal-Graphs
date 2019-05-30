@@ -1,3 +1,5 @@
+{-# LANGUAGE RecordWildCards #-}
+
 module Lib
     ( maxClique
     , maxCliqueFold
@@ -11,8 +13,10 @@ module Lib
     , addSucs
     , getSucSet
     , buildTreeDecomp
-    , third
     , treeDecomp
+    , getTreeDecomp
+    , TDState
+    , roseTreeDecomp
     ) where
 
 import Control.Monad.State
@@ -20,17 +24,9 @@ import Data.Graph.Inductive.Graph
 import Data.Graph.Inductive.PatriciaTree
 import Data.List
 import Data.Set (Set)
+import RoseTree
 import qualified Data.IntMap.Lazy as IM
 import qualified Data.Set as Set
-
--- maybe use Map as a state to pass through treeDecomp
--- import qualified Data.Map as Map
-
--- TODO: finish treeDecomp function
---       make types more general by not enforcing unlabeled edges 
---       implement independent set
---       input graphs from text file using IO monad
---       implement isChordal as a fold
 
 type Bag        = Set Node
 type TreeDecomp = Gr Bag ()
@@ -42,10 +38,29 @@ type SucSet     = Node -> Set Node
 --      the partial tree decomposition
 --      the current bag being processed
 
-type TDState    = (IM.IntMap Node, SucSet, TreeDecomp, Node)
+--type TDState    = (IM.IntMap Node, SucSet, TreeDecomp, Node)
+data TDState = TDState {
+    bagMap    :: IM.IntMap Node,
+    sucMap    :: SucSet,
+    partialTD :: TreeDecomp,
+    currBag   :: Node
+}
 
-third :: (a,b,c,d) -> c
-third (_,_,c,_) = c
+type RTreeDecomp = RTree Bag
+
+-- the node parameter is the root of the tree
+-- assumes an undirected graph, hence the children are taken from both predecessors and successors
+-- the map logic only works under the assumption that the input is a tree
+roseTreeDecomp :: TreeDecomp -> Node -> RTreeDecomp
+roseTreeDecomp td n
+    | isEmpty td = Empty
+    | otherwise  = case match n td of
+                    (Just c, td') -> Node (lab' c) (map (roseTreeDecomp td') children)
+                        where children = pre' c ++ suc' c
+                    (Nothing, _)  -> error "node not found"
+
+getTreeDecomp :: TDState -> TreeDecomp
+getTreeDecomp = partialTD
 
 testTD = mkGraph [(1, Set.fromList [1, 2, 3, 4]), (2, Set.fromList [2, 3]), (3, Set.fromList [3, 4]), (4, Set.fromList [1, 4])]
                  [(1, 2, ()), (2, 3, ()), (3, 4, ())]
@@ -61,36 +76,37 @@ buildTreeDecomp :: Gr a b -> State TDState ()
 buildTreeDecomp g
     | isEmpty g = return ()
     | otherwise = do
-                    (im, ss,td,k) <- get
+                    TDState{..} <- get
                     let (c,g') = matchLargest g -- process elimination ordering backwards
                         i      = node' c        -- current node of g being processed
-                        bi     = ss i           -- the new bag
+                        --bi     = ss i           -- the new bag
+                        bi     = sucMap i
                         m      = minimum bi      -- minimum successor of i
-                        tm     = case IM.lookup m im of
+                        tm     = case IM.lookup m bagMap of
                                     Just l   -> l
                                     Nothing  -> error "tm: Bag not found"
-                        bm     = case match tm td of
+                        bm     = case match tm partialTD of
                                     (Just c,_)   -> lab' c
                                     (Nothing,_)  -> error "bm: Bag not found" 
                     if bi == bm
                     then
-                        let im' = IM.insert i tm im
-                            td' = addToBag td tm i
-                        in put (im', ss, td', k)
+                        let bagMap' = IM.insert i tm bagMap
+                            partialTD' = addToBag partialTD tm i
+                        in put TDState{bagMap=bagMap',sucMap=sucMap,partialTD=partialTD',currBag=currBag}
                     else
-                        let k'  = k + 1
+                        let currBag'  = currBag + 1
                             bk' = Set.insert i bi
-                            im' = IM.insert i k' im
-                            td' = ([], k', bk', [((), tm)]) & td
-                        in put (im', ss, td', k')
+                            bagMap' = IM.insert i currBag' bagMap
+                            partialTD' = ([], currBag', bk', [((), tm)]) & partialTD
+                        in put TDState{bagMap=bagMap',sucMap=sucMap,partialTD=partialTD',currBag=currBag'}
                     buildTreeDecomp g'
 
 treeDecomp :: Gr a b -> ((), TDState)
-treeDecomp g = runState (buildTreeDecomp g') ( IM.singleton n 1
-                                             , getSucSet g
-                                             , mkGraph [(1, Set.singleton n)] []
-                                             , 1
-                                             )
+treeDecomp g = runState (buildTreeDecomp g') TDState{ bagMap=IM.singleton n 1
+                                                    , sucMap=getSucSet g
+                                                    , partialTD =mkGraph [(1, Set.singleton n)] []
+                                                    , currBag=1
+                                             }
     where n  = noNodes g
           g' = delNode n g
 
@@ -98,7 +114,7 @@ treeDecomp g = runState (buildTreeDecomp g') ( IM.singleton n 1
 sucNeighbors :: Gr a b -> Node -> [Node]
 sucNeighbors g n = filter (\v -> v `elem` suc g n) (neighbors g n)
 
--- add vertex to bag      Bag     Vertex
+-- add vertex to bag      Bag Index Vertex
 addToBag :: TreeDecomp -> Node -> Node -> TreeDecomp
 addToBag td b v = insNode (b, lb') (delNode b td)
     where lb  = case lab td b of (Just l) -> l -- TreeDecomp type should make this safe
@@ -111,7 +127,7 @@ isChordal g = go g 1
             | isEmpty g = True
             | otherwise =
                 case match n g of
-                    (Just c, g') -> isChordal' r e && go g' (n+1)
+                    (Just c, g')  -> isChordal' r e && go g' (n+1)
                         where r = map fst $ lsuc' c
                               e = edges g
                     (Nothing, g') -> error "Vertex not found"
