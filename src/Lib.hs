@@ -19,6 +19,7 @@ module Lib
     , roseTreeDecomp
     ) where
 
+import Control.Monad.Reader
 import Control.Monad.State
 import Data.Graph.Inductive.Graph
 import Data.Graph.Inductive.PatriciaTree
@@ -38,7 +39,6 @@ type SucSet     = Node -> Set Node
 --      the partial tree decomposition
 --      the current bag being processed
 
---type TDState    = (IM.IntMap Node, SucSet, TreeDecomp, Node)
 data TDState = TDState {
     bagMap    :: IM.IntMap Node,
     sucMap    :: SucSet,
@@ -50,7 +50,7 @@ type RTreeDecomp = RTree Bag
 
 -- the node parameter is the root of the tree
 -- assumes an undirected graph, hence the children are taken from both predecessors and successors
--- the map logic only works under the assumption that the input is a tree
+-- the map otherwise case only works under the assumption that the input is a tree
 roseTreeDecomp :: TreeDecomp -> Node -> RTreeDecomp
 roseTreeDecomp td n
     | isEmpty td = Empty
@@ -66,22 +66,16 @@ testTD = mkGraph [(1, Set.fromList [1, 2, 3, 4]), (2, Set.fromList [2, 3]), (3, 
                  [(1, 2, ()), (2, 3, ()), (3, 4, ())]
                  :: TreeDecomp
 
---  i: index of the current vertex being processed
---  k: index of current bag being populated
--- td: the tree decomposition
---  b: current bag being populated
---  t: a function Node -> Node that maps a node of g to it's corresponding bag in td
-
 buildTreeDecomp :: Gr a b -> State TDState ()
 buildTreeDecomp g
     | isEmpty g = return ()
     | otherwise = do
                     TDState{..} <- get
-                    let (c,g') = matchLargest g -- process elimination ordering backwards
-                        i      = node' c        -- current node of g being processed
+                    let (c,g') = matchLargest g   -- process elimination ordering backwards
+                        i      = node' c          -- current node of g being processed
                         --bi     = ss i           -- the new bag
-                        bi     = sucMap i
-                        m      = minimum bi      -- minimum successor of i
+                        bi     = sucMap i         -- successors of i in the elimination ordering
+                        m      = minimum bi       -- minimum successor of i
                         tm     = case IM.lookup m bagMap of
                                     Just l   -> l
                                     Nothing  -> error "tm: Bag not found"
@@ -104,7 +98,7 @@ buildTreeDecomp g
 treeDecomp :: Gr a b -> ((), TDState)
 treeDecomp g = runState (buildTreeDecomp g') TDState{ bagMap=IM.singleton n 1
                                                     , sucMap=getSucSet g
-                                                    , partialTD =mkGraph [(1, Set.singleton n)] []
+                                                    , partialTD=mkGraph [(1, Set.singleton n)] []
                                                     , currBag=1
                                              }
     where n  = noNodes g
@@ -118,30 +112,44 @@ sucNeighbors g n = filter (\v -> v `elem` suc g n) (neighbors g n)
 addToBag :: TreeDecomp -> Node -> Node -> TreeDecomp
 addToBag td b v = insNode (b, lb') (delNode b td)
     where lb  = case lab td b of (Just l) -> l -- TreeDecomp type should make this safe
+                                 Nothing  -> error "Bag not found"
           lb' = Set.insert v lb
 
 isChordal :: Gr a b -> Bool
-isChordal g = go g 1
-    where 
-        go g n
-            | isEmpty g = True
-            | otherwise =
-                case match n g of
-                    (Just c, g')  -> isChordal' r e && go g' (n+1)
-                        where r = map fst $ lsuc' c
-                              e = edges g
-                    (Nothing, g') -> error "Vertex not found"
+isChordal g = isChordal' g (edges g)
 
--- helper function for isChordal
-isChordal' :: [Node] -> [Edge] -> Bool
-isChordal' [] _  = True
-isChordal' (n:ns) es = vChordal n ns && isChordal' ns es
-    where
-        vChordal n [] = True
-        vChordal n (n':ns) = (n, n') `elem` es && vChordal n ns
+isChordal' :: Gr a b -> [Edge] -> Bool
+isChordal' g es
+    | isEmpty g = True
+    | otherwise = isClique sucs es && isChordal' g' es
+        where (c,g') = matchAny g
+              sucs   = suc' c
 
---isChordalFold :: Gr a b -> Bool
---isChordalFold = ufold (\c -> True) True
+isClique :: [Node] -> [Edge] -> Bool
+isClique [] _ = True
+isClique (n:ns) es = checkVertex n ns && isClique ns es
+    where checkVertex n [] = True
+          checkVertex n (n':ns) = (n,n') `elem` es && checkVertex n ns
+
+--isChordal :: Gr a b -> Bool
+--isChordal g = go g 1
+--    where 
+--        go g n
+--            | isEmpty g = True
+--            | otherwise =
+--                case match n g of
+--                    (Just c, g')  -> isChordal' r e && go g' (n+1)
+--                        where r = map fst $ lsuc' c
+--                              e = edges g
+--                    (Nothing, g') -> error "Vertex not found"
+--
+---- helper function for isChordal
+--isChordal' :: [Node] -> [Edge] -> Bool
+--isChordal' [] _  = True
+--isChordal' (n:ns) es = vChordal n ns && isChordal' ns es
+--    where
+--        vChordal n [] = True
+--        vChordal n (n':ns) = (n, n') `elem` es && vChordal n ns
 
 -- helper function for chordalCompletion
 addClique :: Gr a () -> [Node] -> Gr a ()
@@ -202,6 +210,7 @@ ofold' _ u _ []     = u
 ofold' f u g (n:ns) = f c (ofold' f u g ns)
     where c = context g n
 
+-- computing degrees of a graph
 type NodeMap = Node -> Int
 
 inc :: NodeMap -> Node -> NodeMap
@@ -220,13 +229,8 @@ maxDegree :: Gr a b -> Int
 maxDegree g = maximum (map f (nodes g))
     where f = degrees g
 
-ufold' :: (Graph gr) => (gr a b -> GDecomp gr a b) -> (Context a b -> c -> c) -> c -> gr a b -> c
-ufold' m f u g
-    | isEmpty g = u
-    | otherwise = f c (ufold' m f u g')
-    where
-        (c,g') = m g
 
+-- fold a graph in reverse
 matchLargest :: (Graph gr) => gr a b -> GDecomp gr a b
 matchLargest g = case (reverse $ nodes g) of
                    []    -> error "Match Exception, Empty Graph"
